@@ -118,6 +118,14 @@ crypto_symbols = ['BTC', 'ETH', 'XRP', 'BNB', 'DOGE']
 main_dir = os.getcwd()
 base_paths = {"BTC": main_dir}
 
+MODE = os.environ.get("POWERTRADER_MODE", "").strip().lower()
+BACKTEST_MODE = MODE == "backtest"
+BACKTEST_OUTPUT_DIR = os.environ.get("POWERTRADER_BACKTEST_OUTPUT")
+
+if BACKTEST_OUTPUT_DIR:
+        main_dir = BACKTEST_OUTPUT_DIR
+        base_paths = _build_base_paths(main_dir, crypto_symbols)
+
 _last_settings_mtime = None
 
 def _refresh_paths_and_symbols():
@@ -165,21 +173,30 @@ except Exception:
     BASE64_PRIVATE_KEY = ""
 
 if not API_KEY or not BASE64_PRIVATE_KEY:
-    print(
-        "\n[PowerTrader] Robinhood API credentials not found.\n"
-        "Open the GUI and go to Settings → Robinhood API → Setup / Update.\n"
-        "That wizard will generate your keypair, tell you where to paste the public key on Robinhood,\n"
-        "and will save r_key.txt + r_secret.txt so this trader can authenticate.\n"
-    )
-    raise SystemExit(1)
+    if BACKTEST_MODE:
+        print("[PowerTrader] Backtest mode detected; skipping Robinhood credential requirement.")
+    else:
+        print(
+            "\n[PowerTrader] Robinhood API credentials not found.\n"
+            "Open the GUI and go to Settings → Robinhood API → Setup / Update.\n"
+            "That wizard will generate your keypair, tell you where to paste the public key on Robinhood,\n"
+            "and will save r_key.txt + r_secret.txt so this trader can authenticate.\n"
+        )
+        raise SystemExit(1)
 
 class CryptoAPITrading:
     def __init__(self):
         # keep a copy of the folder map (same idea as trader.py)
         self.path_map = dict(base_paths)
 
-        self.api_key = API_KEY
-        private_key_seed = base64.b64decode(BASE64_PRIVATE_KEY)
+        self.offline_mode = BACKTEST_MODE
+
+        self.api_key = API_KEY or "offline-backtest"
+        private_seed_b64 = BASE64_PRIVATE_KEY
+        if self.offline_mode and not private_seed_b64:
+            private_seed_b64 = base64.b64encode(b"0" * 32).decode("utf-8")
+
+        private_key_seed = base64.b64decode(private_seed_b64)
         self.private_key = SigningKey(private_key_seed)
         self.base_url = "https://trading.robinhood.com"
 
@@ -385,6 +402,14 @@ class CryptoAPITrading:
             return val
         except Exception:
             return 0
+
+    @staticmethod
+    def _read_value_from_folder(folder: str, filename: str, default: str = "n/a") -> str:
+        try:
+            with open(os.path.join(folder, filename), "r") as f:
+                return f.read().strip()
+        except Exception:
+            return default
 
 
 
@@ -1426,6 +1451,34 @@ class CryptoAPITrading:
             except Exception as e:
                 print(traceback.format_exc())
 
+    def run_offline_monitor(self):
+        print("[PowerTrader] Trader backtest monitor running (no Robinhood API calls).")
+        while True:
+            try:
+                _refresh_paths_and_symbols()
+                summaries = []
+                for sym in crypto_symbols:
+                    folder = base_paths.get(sym, main_dir if sym == "BTC" else os.path.join(main_dir, sym))
+                    long_pm = self._read_value_from_folder(folder, "futures_long_profit_margin.txt")
+                    short_pm = self._read_value_from_folder(folder, "futures_short_profit_margin.txt")
+                    long_dca = self._read_long_dca_signal(sym)
+                    short_dca = self._read_short_dca_signal(sym)
+                    summaries.append(
+                        f"{sym}: LPM={long_pm} SPM={short_pm} LDCA={long_dca} SDCA={short_dca}"
+                    )
+
+                os.system('cls' if os.name == 'nt' else 'clear')
+                print("\n".join(summaries) or "No coins configured")
+                time.sleep(1.0)
+            except KeyboardInterrupt:
+                break
+            except Exception:
+                print(traceback.format_exc())
+                time.sleep(1.0)
+
 if __name__ == "__main__":
     trading_bot = CryptoAPITrading()
-    trading_bot.run()
+    if trading_bot.offline_mode:
+        trading_bot.run_offline_monitor()
+    else:
+        trading_bot.run()
