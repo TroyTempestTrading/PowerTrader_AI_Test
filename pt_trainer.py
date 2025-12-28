@@ -104,6 +104,7 @@ upordown5 = []
 import json
 import uuid
 import os
+import csv
 
 # ---- speed knobs ----
 VERBOSE = False  # set True if you want the old high-volume prints
@@ -234,17 +235,88 @@ tf_choices = ['1hour', '2hour', '4hour', '8hour', '12hour', '1day', '1week']
 tf_minutes = [60, 120, 240, 480, 720, 1440, 10080]
 # --- GUI HUB INPUT (NO PROMPTS) ---
 # Usage: python pt_trainer.py BTC [reprocess_yes|reprocess_no]
+DEFAULT_DATA_SOURCE = os.getenv("PT_DATA_SOURCE", "kucoin").strip().lower()
+DEFAULT_CSV_ROOT = os.getenv("PT_CSV_ROOT")
+
 _arg_coin = "BTC"
 
+def _parse_cli():
+        import argparse
+
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("coin", nargs="?", default="BTC")
+        parser.add_argument("reprocess", nargs="?", default=None)
+        parser.add_argument("--data-source", choices=["kucoin", "csv"], default=DEFAULT_DATA_SOURCE)
+        parser.add_argument("--csv-root", default=DEFAULT_CSV_ROOT)
+        args, _ = parser.parse_known_args()
+        return args
+
 try:
-	if len(sys.argv) > 1 and str(sys.argv[1]).strip():
-		_arg_coin = str(sys.argv[1]).strip().upper()
+        _cli_args = _parse_cli()
+        if str(_cli_args.coin).strip():
+                _arg_coin = str(_cli_args.coin).strip().upper()
 except Exception:
-	_arg_coin = "BTC"
+        _arg_coin = "BTC"
 
 coin_choice = _arg_coin + '-USDT'
 
-restart_processing = "yes"
+data_source_choice = getattr(globals().get("_cli_args", {}), "data_source", DEFAULT_DATA_SOURCE).strip().lower()
+csv_root_choice = getattr(globals().get("_cli_args", {}), "csv_root", DEFAULT_CSV_ROOT)
+restart_processing = getattr(globals().get("_cli_args", {}), "reprocess", None) or "yes"
+
+
+def _format_history_row(timestamp, open_price, close_price, high_price, low_price, volume):
+        return f"[{timestamp}, {open_price}, {close_price}, {high_price}, {low_price}, {volume}]"
+
+
+def load_history_from_kucoin(coin, timeframe, start, end):
+        return (
+                str(market.get_kline(coin, timeframe, startAt=end, endAt=start))
+                .replace(']]', ']')
+                .replace('[[', '[')
+                .split('], [')
+        )
+
+
+def load_history_from_csv(coin, timeframe, start, end, csv_root=None):
+        if not csv_root:
+                raise ValueError("CSV root path must be provided when using csv data source")
+        base_dir = os.path.join(csv_root, timeframe, coin)
+        if not os.path.isdir(base_dir):
+                return []
+        rows = []
+        for filename in sorted(os.listdir(base_dir)):
+                if not filename.lower().endswith(".csv"):
+                        continue
+                filepath = os.path.join(base_dir, filename)
+                try:
+                        with open(filepath, "r", newline="", encoding="utf-8") as fh:
+                                reader = csv.DictReader(fh)
+                                for row in reader:
+                                        normalized = {k.lower(): v for k, v in row.items()}
+                                        try:
+                                                ts = float(normalized.get("timestamp"))
+                                                if ts < end or ts > start:
+                                                        continue
+                                                open_price = float(normalized.get("open"))
+                                                high_price = float(normalized.get("high"))
+                                                low_price = float(normalized.get("low"))
+                                                close_price = float(normalized.get("close"))
+                                                volume = float(normalized.get("volume"))
+                                        except Exception:
+                                                continue
+                                        rows.append((ts, _format_history_row(int(ts), open_price, close_price, high_price, low_price, volume)))
+                except Exception:
+                        continue
+        rows.sort(key=lambda x: x[0], reverse=True)
+        return [row for _, row in rows]
+
+
+def load_history(coin, timeframe, start, end, source="kucoin", csv_root=None):
+        source = (source or "kucoin").lower()
+        if source == "csv":
+                return load_history_from_csv(coin, timeframe, start, end, csv_root=csv_root)
+        return load_history_from_kucoin(coin, timeframe, start, end)
 
 # GUI reads this status file to know if this coin is TRAINING or FINISHED
 _trainer_started_at = int(time.time())
@@ -400,7 +472,14 @@ while True:
 	while True:
 		time.sleep(.5)
 		try:
-			history = str(market.get_kline(coin_choice,timeframe,startAt=end_time,endAt=start_time)).replace(']]','], ').replace('[[','[').split('], [')
+			history = load_history(
+				coin_choice,
+				timeframe,
+				start_time,
+				end_time,
+				source=data_source_choice,
+				csv_root=csv_root_choice,
+			)
 		except Exception as e:
 			PrintException()
 			time.sleep(3.5)
