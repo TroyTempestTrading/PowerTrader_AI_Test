@@ -18,6 +18,8 @@ import logging
 import json
 import uuid
 
+from backtest_feed import BacktestPriceReplay
+
 from nacl.signing import SigningKey
 
 # -----------------------------
@@ -28,6 +30,11 @@ from nacl.signing import SigningKey
 ROBINHOOD_BASE_URL = "https://trading.robinhood.com"
 
 _RH_MD = None  # lazy-init so import doesn't explode if creds missing
+
+BACKTEST_MODE = (os.environ.get("POWERTRADER_MODE", "").strip().lower() == "backtest")
+BACKTEST_CSV_ROOT = os.environ.get("POWERTRADER_BACKTEST_CSV_ROOT")
+BACKTEST_TIMEFRAME = os.environ.get("POWERTRADER_BACKTEST_TIMEFRAME", "1hour")
+BACKTEST_OUTPUT_DIR = os.environ.get("POWERTRADER_BACKTEST_OUTPUT")
 
 
 class RobinhoodMarketData:
@@ -116,6 +123,24 @@ def robinhood_current_ask(symbol: str) -> float:
     return _RH_MD.get_current_ask(symbol)
 
 
+def _current_price_for_coin(sym: str) -> float:
+    """Return the current price for a coin based on mode."""
+    sym = (sym or "").strip().upper()
+    if BACKTEST_MODE and BACKTEST_REPLAY:
+        try:
+            return BACKTEST_REPLAY.next_price(sym)
+        except Exception:
+            pass
+
+    rh_symbol = f"{sym}-USD"
+    while True:
+        try:
+            return robinhood_current_ask(rh_symbol)
+        except Exception:
+            time.sleep(1)
+            continue
+
+
 def restart_program():
 	"""Restarts the current program (no CLI args; uses hardcoded COIN_SYMBOLS)."""
 	try:
@@ -194,11 +219,29 @@ COIN_SYMBOLS = _load_gui_coins()
 CURRENT_COINS = list(COIN_SYMBOLS)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if not BACKTEST_OUTPUT_DIR:
+        BACKTEST_OUTPUT_DIR = os.path.join(BASE_DIR, "backtest_signals")
+
+
+def coin_output_folder(sym: str) -> str:
+        sym = sym.upper()
+        root_dir = BACKTEST_OUTPUT_DIR
+        return root_dir if sym == 'BTC' else os.path.join(root_dir, sym)
 
 def coin_folder(sym: str) -> str:
-	sym = sym.upper()
-	# Your "main folder is BTC folder" convention:
-	return BASE_DIR if sym == 'BTC' else os.path.join(BASE_DIR, sym)
+        sym = sym.upper()
+        # Your "main folder is BTC folder" convention:
+        return BASE_DIR if sym == 'BTC' else os.path.join(BASE_DIR, sym)
+
+
+def _write_output_file(sym: str, filename: str, content) -> None:
+        target_dir = coin_output_folder(sym) if BACKTEST_MODE else coin_folder(sym)
+        try:
+                os.makedirs(target_dir, exist_ok=True)
+                with open(os.path.join(target_dir, filename), 'w+') as f:
+                        f.write(str(content))
+        except Exception:
+                pass
 
 
 # --- training freshness gate (mirrors pt_hub.py) ---
@@ -262,7 +305,19 @@ def _write_runner_ready(ready: bool, stage: str, ready_coins=None, total_coins: 
 
 # Ensure folders exist for the current configured coins
 for _sym in CURRENT_COINS:
-	os.makedirs(coin_folder(_sym), exist_ok=True)
+        os.makedirs(coin_folder(_sym), exist_ok=True)
+        if BACKTEST_MODE:
+                try:
+                        os.makedirs(coin_output_folder(_sym), exist_ok=True)
+                except Exception:
+                        pass
+
+BACKTEST_REPLAY = None
+if BACKTEST_MODE and BACKTEST_CSV_ROOT:
+        try:
+                BACKTEST_REPLAY = BacktestPriceReplay(BACKTEST_CSV_ROOT, BACKTEST_TIMEFRAME, CURRENT_COINS)
+        except Exception:
+                BACKTEST_REPLAY = None
 
 
 distance = 0.5
@@ -447,33 +502,35 @@ cc_update = 'yes'
 wr_update = 'yes'
 
 def find_purple_area(lines):
-    """
-    Given a list of (price, color) pairs (color is 'orange' or 'blue'),
-    returns (purple_bottom, purple_top) if a purple area exists,
-    else (None, None).
-    """
-    oranges = sorted([price for price, color in lines if color == 'orange'], reverse=True)
-    blues   = sorted([price for price, color in lines if color == 'blue'])
-    if not oranges or not blues:
+        """
+        Given a list of (price, color) pairs (color is 'orange' or 'blue'),
+        returns (purple_bottom, purple_top) if a purple area exists,
+        else (None, None).
+        """
+        oranges = sorted([price for price, color in lines if color == 'orange'], reverse=True)
+        blues   = sorted([price for price, color in lines if color == 'blue'])
+        if not oranges or not blues:
+                return (None, None)
+        purple_bottom = None
+        purple_top = None
+        all_levels = sorted(set(oranges + blues + [float('-inf'), float('inf')]), reverse=True)
+        for i in range(len(all_levels) - 1):
+                top = all_levels[i]
+                bottom = all_levels[i+1]
+                oranges_below = [o for o in oranges if o < bottom]
+                blues_above = [b for b in blues if b > top]
+                has_orange_below = any(o < top for o in oranges)
+                has_blue_above = any(b > bottom for b in blues)
+                if has_orange_below and has_blue_above:
+                        if purple_bottom is None or bottom < purple_bottom:
+                                purple_bottom = bottom
+                        if purple_top is None or top > purple_top:
+                                purple_top = top
+        if purple_bottom is not None and purple_top is not None and purple_top > purple_bottom:
+                return (purple_bottom, purple_top)
         return (None, None)
-    purple_bottom = None
-    purple_top = None
-    all_levels = sorted(set(oranges + blues + [float('-inf'), float('inf')]), reverse=True)
-    for i in range(len(all_levels) - 1):
-        top = all_levels[i]
-        bottom = all_levels[i+1]
-        oranges_below = [o for o in oranges if o < bottom]
-        blues_above = [b for b in blues if b > top]
-        has_orange_below = any(o < top for o in oranges)
-        has_blue_above = any(b > bottom for b in blues)
-        if has_orange_below and has_blue_above:
-            if purple_bottom is None or bottom < purple_bottom:
-                purple_bottom = bottom
-            if purple_top is None or top > purple_top:
-                purple_top = top
-    if purple_bottom is not None and purple_top is not None and purple_top > purple_bottom:
-        return (purple_bottom, purple_top)
-    return (None, None)
+
+
 def step_coin(sym: str):
 	# run inside the coin folder so all existing file reads/writes stay relative + isolated
 	os.chdir(coin_folder(sym))
@@ -486,14 +543,10 @@ def step_coin(sym: str):
 	if not _coin_is_trained(sym):
 		try:
 			# Prevent new trades (and DCA) by forcing signals to 0 and keeping PM at baseline.
-			with open('futures_long_profit_margin.txt', 'w+') as f:
-				f.write('0.25')
-			with open('futures_short_profit_margin.txt', 'w+') as f:
-				f.write('0.25')
-			with open('long_dca_signal.txt', 'w+') as f:
-				f.write('0')
-			with open('short_dca_signal.txt', 'w+') as f:
-				f.write('0')
+			_write_output_file(sym, 'futures_long_profit_margin.txt', '0.25')
+			_write_output_file(sym, 'futures_short_profit_margin.txt', '0.25')
+			_write_output_file(sym, 'long_dca_signal.txt', '0')
+			_write_output_file(sym, 'short_dca_signal.txt', '0')
 		except Exception:
 			pass
 		try:
@@ -509,11 +562,9 @@ def step_coin(sym: str):
 				ready_coins=sorted(list(_ready_coins)),
 				total_coins=len(CURRENT_COINS),
 			)
-
 		except Exception:
 			pass
 		return
-
 
 	# ensure new readiness-version keys exist even if restarting from an older state dict
 	if 'bounds_version' not in st:
@@ -730,15 +781,8 @@ def step_coin(sym: str):
 		# reset tf_update for this coin (but DO NOT block-wait; just detect updates and return)
 		tf_update = ['no'] * len(tf_choices)
 
-		# get current price ONCE per coin — use Robinhood's current ASK (same as rhcb trader buy price)
-		rh_symbol = f"{sym}-USD"
-		while True:
-			try:
-				current = robinhood_current_ask(rh_symbol)
-				break
-			except Exception:
-				time.sleep(1)
-				continue
+		# get current price ONCE per coin — either from backtest replay or Robinhood
+		current = _current_price_for_coin(sym)
 
 		# IMPORTANT: messages printed below use the bounds currently in state.
 		# We only allow "ready" once messages are generated using a non-startup bounds_version.
@@ -1012,10 +1056,8 @@ def step_coin(sym: str):
 			except:
 				pm = 0.25
 
-			with open('futures_long_profit_margin.txt', 'w+') as f:
-				f.write(str(pm))
-			with open('long_dca_signal.txt', 'w+') as f:
-				f.write(str(longs))
+			_write_output_file(sym, 'futures_long_profit_margin.txt', str(pm))
+			_write_output_file(sym, 'long_dca_signal.txt', str(longs))
 
 			# short pm
 			current_pms = [m for m in margins if m != 0]
@@ -1026,10 +1068,8 @@ def step_coin(sym: str):
 			except:
 				pm = 0.25
 
-			with open('futures_short_profit_margin.txt', 'w+') as f:
-				f.write(str(abs(pm)))
-			with open('short_dca_signal.txt', 'w+') as f:
-				f.write(str(shorts))
+			_write_output_file(sym, 'futures_short_profit_margin.txt', str(abs(pm)))
+			_write_output_file(sym, 'short_dca_signal.txt', str(shorts))
 
 		except:
 			PrintException()
