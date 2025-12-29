@@ -286,6 +286,9 @@ DEFAULT_SETTINGS = {
     "script_neural_runner2": "pt_thinker.py",
     "script_neural_trainer": "pt_trainer.py",
     "script_trader": "pt_trader.py",
+    "offline_training_data_dir": "",
+    "offline_backtest_data_dir": "",
+    "offline_backtest_output_dir": "",
     "auto_start_scripts": False,
 }
 
@@ -1497,6 +1500,24 @@ class PowerTraderHub(tk.Tk):
         # file written by pt_thinker.py (runner readiness gate used for Start All)
         self.runner_ready_path = os.path.join(self.hub_dir, "runner_ready.json")
 
+        # Offline data paths (persisted in settings)
+        default_backtest_out = self.settings.get("offline_backtest_output_dir") or os.path.join(self.hub_dir, "backtest_output")
+        self.settings["offline_backtest_output_dir"] = default_backtest_out
+
+        self.offline_training_dir_var = tk.StringVar(value=self.settings.get("offline_training_data_dir", ""))
+        self.offline_backtest_dir_var = tk.StringVar(value=self.settings.get("offline_backtest_data_dir", ""))
+        self.offline_backtest_output_var = tk.StringVar(value=default_backtest_out)
+
+        def _bind_path_setting(var: tk.StringVar, key: str) -> None:
+            def _on_change(*_):
+                self.settings[key] = var.get().strip()
+
+            var.trace_add("write", _on_change)
+
+        _bind_path_setting(self.offline_training_dir_var, "offline_training_data_dir")
+        _bind_path_setting(self.offline_backtest_dir_var, "offline_backtest_data_dir")
+        _bind_path_setting(self.offline_backtest_output_var, "offline_backtest_output_dir")
+
 
         # internal: when Start All is pressed, we start the runner first and only start the trader once ready
         self._auto_start_trader_pending = False
@@ -1535,6 +1556,8 @@ class PowerTraderHub(tk.Tk):
         # live log queues
         self.runner_log_q: "queue.Queue[str]" = queue.Queue()
         self.trader_log_q: "queue.Queue[str]" = queue.Queue()
+        self.backtest_log_q: "queue.Queue[str]" = queue.Queue()
+        self.backtest_proc: Optional[subprocess.Popen] = None
 
         # trainers: coin -> LogProc
         self.trainers: Dict[str, LogProc] = {}
@@ -2192,6 +2215,60 @@ class PowerTraderHub(tk.Tk):
         )
         self.training_list.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
+        offline_box = ttk.LabelFrame(training_left, text="Offline CSV training / backtest")
+        offline_box.pack(fill="x", padx=6, pady=(0, 6))
+        offline_box.columnconfigure(1, weight=1)
+
+        ttk.Label(offline_box, text="Training data:").grid(row=0, column=0, sticky="w", padx=(6, 8), pady=(6, 2))
+        ttk.Entry(offline_box, textvariable=self.offline_training_dir_var).grid(row=0, column=1, sticky="ew", pady=(6, 2))
+
+        def _browse_offline_training():
+            picked = filedialog.askdirectory()
+            if picked:
+                self.offline_training_dir_var.set(picked)
+                try:
+                    self._save_settings()
+                except Exception:
+                    pass
+
+        ttk.Button(offline_box, text="Browse", command=_browse_offline_training).grid(row=0, column=2, sticky="e", padx=(8, 6), pady=(6, 2))
+
+        ttk.Label(offline_box, text="Backtest data:").grid(row=1, column=0, sticky="w", padx=(6, 8), pady=2)
+        ttk.Entry(offline_box, textvariable=self.offline_backtest_dir_var).grid(row=1, column=1, sticky="ew", pady=2)
+
+        def _browse_offline_backtest():
+            picked = filedialog.askdirectory()
+            if picked:
+                self.offline_backtest_dir_var.set(picked)
+                try:
+                    self._save_settings()
+                except Exception:
+                    pass
+
+        ttk.Button(offline_box, text="Browse", command=_browse_offline_backtest).grid(row=1, column=2, sticky="e", padx=(8, 6), pady=2)
+
+        ttk.Label(offline_box, text="Backtest output:").grid(row=2, column=0, sticky="w", padx=(6, 8), pady=2)
+        ttk.Entry(offline_box, textvariable=self.offline_backtest_output_var).grid(row=2, column=1, sticky="ew", pady=2)
+
+        def _browse_backtest_output():
+            picked = filedialog.askdirectory()
+            if picked:
+                self.offline_backtest_output_var.set(picked)
+                try:
+                    self._save_settings()
+                except Exception:
+                    pass
+
+        ttk.Button(offline_box, text="Browse", command=_browse_backtest_output).grid(row=2, column=2, sticky="e", padx=(8, 6), pady=2)
+
+        offline_actions = ttk.Frame(offline_box)
+        offline_actions.grid(row=3, column=0, columnspan=3, sticky="ew", padx=6, pady=(6, 8))
+        offline_actions.columnconfigure(0, weight=1)
+
+        ttk.Button(offline_actions, text="Offline Train Selected", width=BTN_W, command=self.start_offline_training_for_selected).pack(side="left")
+        ttk.Button(offline_actions, text="Offline Train All", width=BTN_W, command=self.start_offline_training_for_all).pack(side="left", padx=(10, 0))
+        ttk.Button(offline_actions, text="Run Backtest", width=BTN_W, command=self.run_offline_backtest).pack(side="left", padx=(10, 0))
+
 
         # Start All (moved here: LEFT side of the dual section, directly above Account)
         start_all_row = ttk.Frame(controls_left)
@@ -2452,6 +2529,28 @@ class PowerTraderHub(tk.Tk):
         self.trainer_text.configure(yscrollcommand=trainer_scroll.set)
         self.trainer_text.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=(0, 6))
         trainer_scroll.pack(side="right", fill="y", padx=(0, 6), pady=(0, 6))
+
+        # Backtest tab (offline training/backtest outputs)
+        self.backtest_tab = ttk.Frame(self.logs_nb)
+        self.logs_nb.add(self.backtest_tab, text="Backtest")
+        self.backtest_text = tk.Text(
+            self.backtest_tab,
+            height=8,
+            wrap="none",
+            font=self._live_log_font,
+            bg=DARK_PANEL,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
+            selectbackground=DARK_SELECT_BG,
+            selectforeground=DARK_SELECT_FG,
+            highlightbackground=DARK_BORDER,
+            highlightcolor=DARK_ACCENT,
+        )
+
+        backtest_scroll = ttk.Scrollbar(self.backtest_tab, orient="vertical", command=self.backtest_text.yview)
+        self.backtest_text.configure(yscrollcommand=backtest_scroll.set)
+        self.backtest_text.pack(side="left", fill="both", expand=True)
+        backtest_scroll.pack(side="right", fill="y")
 
 
         # Add left panes (no trades/history on the left anymore)
@@ -3213,8 +3312,129 @@ class PowerTraderHub(tk.Tk):
             self.trainer_coin_var.set(c)
             self.start_trainer_for_selected_coin()
 
-    def start_trainer_for_selected_coin(self) -> None:
-        coin = (self.trainer_coin_var.get() or "").strip().upper()
+    def _start_offline_training(self, coins: List[str]) -> None:
+        data_dir = (self.offline_training_dir_var.get() or "").strip()
+        if not data_dir:
+            messagebox.showwarning(
+                "Choose training data",
+                "Select a CSV folder for offline training first.",
+            )
+            return
+
+        if not os.path.isdir(data_dir):
+            messagebox.showerror("Invalid folder", f"{data_dir} is not a folder with CSV data")
+            return
+
+        extra_env = {"PT_DATA_SOURCE": "csv", "PT_CSV_ROOT": os.path.abspath(data_dir)}
+        for coin in coins:
+            if not coin:
+                continue
+            try:
+                self.trainer_coin_var.set(coin)
+            except Exception:
+                pass
+            self.start_trainer_for_selected_coin(coin=coin, extra_env=extra_env)
+
+        try:
+            self.logs_nb.select(self.logs_nb.tabs()[2])
+        except Exception:
+            pass
+
+        try:
+            self.status.config(text=f"{_now_str()} | Offline training from {data_dir}")
+        except Exception:
+            pass
+
+    def start_offline_training_for_selected(self) -> None:
+        coin = (getattr(self, "train_coin_var", self.trainer_coin_var).get() or "").strip().upper()
+        if not coin:
+            return
+        self._start_offline_training([coin])
+
+    def start_offline_training_for_all(self) -> None:
+        self._start_offline_training(self.coins)
+
+    def run_offline_backtest(self) -> None:
+        data_dir = (self.offline_backtest_dir_var.get() or "").strip()
+        if not data_dir:
+            messagebox.showwarning("Choose backtest data", "Select a CSV folder for backtesting first.")
+            return
+
+        if not os.path.isdir(data_dir):
+            messagebox.showerror("Invalid folder", f"{data_dir} is not a folder with CSV data")
+            return
+
+        output_dir = (self.offline_backtest_output_var.get() or "").strip()
+        if not output_dir:
+            output_dir = os.path.join(self.hub_dir, "backtest_output")
+            self.offline_backtest_output_var.set(output_dir)
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        if self.backtest_proc and self.backtest_proc.poll() is None:
+            messagebox.showinfo("Backtest running", "Wait for the current backtest to finish before starting another.")
+            return
+
+        script_path = os.path.join(self.project_dir, "pt_backtest.py")
+        if not os.path.isfile(script_path):
+            messagebox.showerror("Missing script", f"Cannot find pt_backtest.py at:\n{script_path}")
+            return
+
+        cmd = [
+            sys.executable,
+            "-u",
+            script_path,
+            "--data-dir",
+            os.path.abspath(data_dir),
+            "--output-dir",
+            os.path.abspath(output_dir),
+            "--per-coin-logs",
+        ]
+
+        for coin in self.coins:
+            cmd.extend(["--coin", coin])
+
+        try:
+            while True:
+                self.backtest_log_q.get_nowait()
+        except queue.Empty:
+            pass
+
+        try:
+            self.backtest_proc = subprocess.Popen(
+                cmd,
+                cwd=self.project_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            t = threading.Thread(
+                target=self._reader_thread,
+                args=(self.backtest_proc, self.backtest_log_q, "[BACKTEST] "),
+                daemon=True,
+            )
+            t.start()
+
+            try:
+                self.logs_nb.select(self.backtest_tab)
+            except Exception:
+                pass
+
+            try:
+                self.status.config(text=f"{_now_str()} | Backtest started (output: {output_dir})")
+            except Exception:
+                pass
+        except Exception as e:
+            messagebox.showerror("Backtest failed", f"Failed to start backtest:\n{e}")
+
+    def start_trainer_for_selected_coin(
+        self,
+        coin: Optional[str] = None,
+        *,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> None:
+        coin = (coin or self.trainer_coin_var.get() or "").strip().upper()
         if not coin:
             return
 
@@ -3294,6 +3514,8 @@ class PowerTraderHub(tk.Tk):
 
         env = os.environ.copy()
         env["POWERTRADER_HUB_DIR"] = self.hub_dir
+        if extra_env:
+            env.update(extra_env)
 
         try:
             # IMPORTANT: pass `coin` so neural_trainer trains the correct market instead of defaulting to BTC
@@ -3554,6 +3776,11 @@ class PowerTraderHub(tk.Tk):
             lp = self.trainers.get(sel)
             if lp:
                 self._drain_queue_to_text(lp.log_q, self.trainer_text)
+        except Exception:
+            pass
+
+        try:
+            self._drain_queue_to_text(self.backtest_log_q, self.backtest_text)
         except Exception:
             pass
 
@@ -4344,6 +4571,9 @@ class PowerTraderHub(tk.Tk):
         main_dir_var = tk.StringVar(value=self.settings["main_neural_dir"])
         coins_var = tk.StringVar(value=",".join(self.settings["coins"]))
         hub_dir_var = tk.StringVar(value=self.settings.get("hub_data_dir", ""))
+        offline_train_dir_var = tk.StringVar(value=self.settings.get("offline_training_data_dir", ""))
+        offline_backtest_dir_var = tk.StringVar(value=self.settings.get("offline_backtest_data_dir", ""))
+        offline_backtest_out_var = tk.StringVar(value=self.settings.get("offline_backtest_output_dir", ""))
 
         neural_script_var = tk.StringVar(value=self.settings["script_neural_runner2"])
         trainer_script_var = tk.StringVar(value=self.settings.get("script_neural_trainer", "pt_trainer.py"))
@@ -4358,6 +4588,9 @@ class PowerTraderHub(tk.Tk):
         add_row(r, "Main neural folder:", main_dir_var, browse="dir"); r += 1
         add_row(r, "Coins (comma):", coins_var); r += 1
         add_row(r, "Hub data dir (optional):", hub_dir_var, browse="dir"); r += 1
+        add_row(r, "Offline training CSV folder:", offline_train_dir_var, browse="dir"); r += 1
+        add_row(r, "Offline backtest CSV folder:", offline_backtest_dir_var, browse="dir"); r += 1
+        add_row(r, "Backtest output folder:", offline_backtest_out_var, browse="dir"); r += 1
 
         ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=3, sticky="ew", pady=10); r += 1
 
@@ -4927,6 +5160,9 @@ class PowerTraderHub(tk.Tk):
                 self.settings["main_neural_dir"] = main_dir_var.get().strip()
                 self.settings["coins"] = [c.strip().upper() for c in coins_var.get().split(",") if c.strip()]
                 self.settings["hub_data_dir"] = hub_dir_var.get().strip()
+                self.settings["offline_training_data_dir"] = offline_train_dir_var.get().strip()
+                self.settings["offline_backtest_data_dir"] = offline_backtest_dir_var.get().strip()
+                self.settings["offline_backtest_output_dir"] = offline_backtest_out_var.get().strip()
                 self.settings["script_neural_runner2"] = neural_script_var.get().strip()
                 self.settings["script_neural_trainer"] = trainer_script_var.get().strip()
                 self.settings["script_trader"] = trader_script_var.get().strip()
