@@ -3,6 +3,10 @@
 The script walks ``<data-dir>/<timeframe>/<coin>/*.csv`` folders, feeds the
 candles into ``pt_trainer.load_history`` (CSV mode), and writes isolated
 artifacts/metrics into ``--output-dir`` so live neural state stays untouched.
+
+CSV inputs are expected to include headers ``time,open,high,low,close`` using
+Unix timestamps for ``time``. A ``volume`` column is optional; if it is
+missing, a default of 0.0 is used during parsing.
 """
 
 from __future__ import annotations
