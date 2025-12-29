@@ -294,15 +294,26 @@ def load_history_from_csv(coin, timeframe, start, end, csv_root=None):
                                 reader = csv.DictReader(fh)
                                 for row in reader:
                                         normalized = {k.lower(): v for k, v in row.items()}
+                                        timestamp_val = normalized.get("time") or normalized.get("timestamp")
+                                        required_fields = [
+                                                timestamp_val,
+                                                normalized.get("open"),
+                                                normalized.get("high"),
+                                                normalized.get("low"),
+                                                normalized.get("close"),
+                                        ]
+                                        # Ensure the expected CSV column pattern exists
+                                        if any(field is None for field in required_fields):
+                                                continue
                                         try:
-                                                ts = float(normalized.get("timestamp"))
+                                                ts = float(timestamp_val)
                                                 if ts < end or ts > start:
                                                         continue
                                                 open_price = float(normalized.get("open"))
                                                 high_price = float(normalized.get("high"))
                                                 low_price = float(normalized.get("low"))
                                                 close_price = float(normalized.get("close"))
-                                                volume = float(normalized.get("volume"))
+                                                volume = float(normalized.get("volume", 0.0) or 0.0)
                                         except Exception:
                                                 continue
                                         rows.append((ts, _format_history_row(int(ts), open_price, close_price, high_price, low_price, volume)))
