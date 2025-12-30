@@ -21,6 +21,7 @@ import time
 from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple
 
+from data_paths import TIMEFRAME_FOLDERS, default_backtest_data_root, ensure_timeframe_dirs
 import pt_trainer
 
 
@@ -28,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Offline backtester for pt_trainer")
     parser.add_argument(
         "--data-dir",
-        required=True,
+        default=default_backtest_data_root(),
         help="Root folder containing timeframe/coin CSV data (timeframe/COIN/*.csv)",
     )
     parser.add_argument(
@@ -180,6 +181,7 @@ def write_coin_logs(output_root: str, coin: str, entries: List[Dict[str, str]]) 
 def main() -> None:
     args = parse_args()
     data_root = os.path.abspath(args.data_dir)
+    ensure_timeframe_dirs(data_root, TIMEFRAME_FOLDERS)
     output_root = os.path.abspath(args.output_dir)
     allowed_coins = set(args.coin) if args.coin else None
 

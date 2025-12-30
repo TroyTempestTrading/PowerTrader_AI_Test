@@ -4,10 +4,16 @@ import subprocess
 import sys
 from typing import List
 
+from data_paths import default_backtest_data_root, ensure_timeframe_dirs, TIMEFRAME_FOLDERS
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run thinker + trader in backtest mode from CSV data")
-    parser.add_argument("--csv-root", required=True, help="Root folder containing timeframe/coin CSV data")
+    parser.add_argument(
+        "--csv-root",
+        default=default_backtest_data_root(),
+        help="Root folder containing timeframe/coin CSV data",
+    )
     parser.add_argument("--timeframe", default="1hour", help="Timeframe folder to replay (default: 1hour)")
     parser.add_argument(
         "--output-dir",
@@ -28,9 +34,12 @@ def _launch_process(cmd: List[str], env: dict) -> subprocess.Popen:
 def main() -> None:
     args = parse_args()
 
+    csv_root = os.path.abspath(args.csv_root)
+    ensure_timeframe_dirs(csv_root, TIMEFRAME_FOLDERS)
+
     env = os.environ.copy()
     env["POWERTRADER_MODE"] = "backtest"
-    env["POWERTRADER_BACKTEST_CSV_ROOT"] = os.path.abspath(args.csv_root)
+    env["POWERTRADER_BACKTEST_CSV_ROOT"] = csv_root
     env["POWERTRADER_BACKTEST_TIMEFRAME"] = args.timeframe
     env["POWERTRADER_BACKTEST_OUTPUT"] = os.path.abspath(args.output_dir)
     if args.gui_settings:
