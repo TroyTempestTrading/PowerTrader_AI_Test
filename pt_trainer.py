@@ -105,6 +105,7 @@ import json
 import uuid
 import os
 import csv
+from data_paths import TIMEFRAME_FOLDERS, default_training_data_root, ensure_timeframe_dirs
 
 # ---- speed knobs ----
 VERBOSE = False  # set True if you want the old high-volume prints
@@ -231,12 +232,14 @@ try:
 		pass
 except:
 	restarted_yet = 0
-tf_choices = ['1hour', '2hour', '4hour', '8hour', '12hour', '1day', '1week']
+tf_choices = TIMEFRAME_FOLDERS
 tf_minutes = [60, 120, 240, 480, 720, 1440, 10080]
 # --- GUI HUB INPUT (NO PROMPTS) ---
 # Usage: python pt_trainer.py BTC [reprocess_yes|reprocess_no]
 DEFAULT_DATA_SOURCE = os.getenv("PT_DATA_SOURCE", "kucoin").strip().lower()
-DEFAULT_CSV_ROOT = os.getenv("PT_CSV_ROOT")
+DEFAULT_CSV_ROOT = os.getenv("PT_CSV_ROOT") or default_training_data_root()
+if DEFAULT_CSV_ROOT:
+        ensure_timeframe_dirs(DEFAULT_CSV_ROOT, TIMEFRAME_FOLDERS)
 
 _arg_coin = "BTC"
 
